@@ -100,7 +100,7 @@ export async function getUnredeemedOrder(email) {
     const { data, error } = await supabase
       .from('orders')
       .select('*')
-      .ilike('email', email) // Case-insensitive match
+      .eq('email', email.toLowerCase()) // Exact match on lowercase email
       .eq('redeemed', false)
       .order('created_at', { ascending: true })
       .limit(1)
