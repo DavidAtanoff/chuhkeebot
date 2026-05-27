@@ -96,7 +96,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-client.once('ready', () => {
+client.once('clientReady', () => {
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
 });
 
@@ -110,18 +110,37 @@ function isAdmin(userId) {
 
 // Handle slash commands
 client.on('interactionCreate', async (interaction) => {
-  if (interaction.isChatInputCommand()) {
-    if (interaction.commandName === 'whitelist') {
-      await handleWhitelistCommand(interaction);
-    } else if (interaction.commandName === 'addproduct') {
-      await handleAddProductCommand(interaction);
-    } else if (interaction.commandName === 'removeproduct') {
-      await handleRemoveProductCommand(interaction);
-    } else if (interaction.commandName === 'listproducts') {
-      await handleListProductsCommand(interaction);
+  try {
+    if (interaction.isChatInputCommand()) {
+      if (interaction.commandName === 'whitelist') {
+        await handleWhitelistCommand(interaction);
+      } else if (interaction.commandName === 'addproduct') {
+        await handleAddProductCommand(interaction);
+      } else if (interaction.commandName === 'removeproduct') {
+        await handleRemoveProductCommand(interaction);
+      } else if (interaction.commandName === 'listproducts') {
+        await handleListProductsCommand(interaction);
+      }
+    } else if (interaction.isButton()) {
+      await handleButtonInteraction(interaction);
     }
-  } else if (interaction.isButton()) {
-    await handleButtonInteraction(interaction);
+  } catch (error) {
+    console.error('❌ Error handling interaction:', error);
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({
+          content: `❌ An error occurred while processing this command: ${error.message}`,
+          components: []
+        });
+      } else {
+        await interaction.reply({
+          content: `❌ An error occurred while processing this command: ${error.message}`,
+          ephemeral: true
+        });
+      }
+    } catch (replyError) {
+      console.error('❌ Failed to send error response to user:', replyError);
+    }
   }
 });
 
