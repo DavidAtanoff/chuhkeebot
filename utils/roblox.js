@@ -65,12 +65,12 @@ export async function acceptJoinRequest(groupId, username) {
 
     const userId = userResult.userId;
 
-    // Accept the join request using Open Cloud API
-    // PATCH https://apis.roblox.com/cloud/v2/groups/{groupId}/join-requests/{userId}:accept
+    // Accept the join request using Open Cloud API (v2 uses POST for this endpoint)
+    // POST https://apis.roblox.com/cloud/v2/groups/{groupId}/join-requests/{userId}:accept
     const url = `${ROBLOX_API_BASE}/groups/${groupId}/join-requests/${userId}:accept`;
     
     const response = await fetch(url, {
-      method: 'PATCH',
+      method: 'POST',
       headers: {
         'x-api-key': ROBLOX_API_KEY,
         'Content-Type': 'application/json'
@@ -106,7 +106,8 @@ export async function acceptJoinRequest(groupId, username) {
 export async function verifyGroupMembership(groupId, userId) {
   try {
     // GET https://apis.roblox.com/cloud/v2/groups/{groupId}/memberships?filter=user=="users/{userId}"
-    const url = `${ROBLOX_API_BASE}/groups/${groupId}/memberships?filter=user=="users/${userId}"&maxPageSize=1`;
+    const filterQuery = `user == "users/${userId}"`;
+    const url = `${ROBLOX_API_BASE}/groups/${groupId}/memberships?filter=${encodeURIComponent(filterQuery)}&maxPageSize=1`;
     
     const response = await fetch(url, {
       method: 'GET',

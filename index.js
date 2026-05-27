@@ -27,12 +27,20 @@ app.post('/webhook', async (req, res) => {
 
   // Verify signature
   const signature = payload.signature;
+  if (!signature) {
+    console.log('❌ Missing signature');
+    return res.sendStatus(401);
+  }
+
   const expected = crypto
-    .createHmac('sha256', PAYHIP_API_KEY)
+    .createHash('sha256')
     .update(PAYHIP_API_KEY)
     .digest('hex');
 
-  if (signature !== expected) {
+  const signatureBuffer = Buffer.from(signature, 'hex');
+  const expectedBuffer = Buffer.from(expected, 'hex');
+
+  if (signatureBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
     console.log('❌ Invalid signature');
     return res.sendStatus(401);
   }
@@ -93,7 +101,7 @@ client.once('ready', () => {
 });
 
 // Admin user IDs - add Discord user IDs who can manage products
-const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS?.split(',') || [];
+const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS?.split(',').map(id => id.trim()) || [];
 
 // Check if user is admin
 function isAdmin(userId) {
@@ -158,7 +166,7 @@ async function handleWhitelistCommand(interaction) {
   const row = new ActionRowBuilder()
     .addComponents(
       new ButtonBuilder()
-        .setCustomId(`confirm_${purchaseId}_${robloxUsername}`)
+        .setCustomId(`confirm:${purchaseId}:${robloxUsername}`)
         .setLabel('Confirm')
         .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
@@ -292,10 +300,10 @@ async function handleButtonInteraction(interaction) {
     });
   }
 
-  if (interaction.customId.startsWith('confirm_')) {
+  if (interaction.customId.startsWith('confirm:')) {
     await interaction.deferUpdate();
 
-    const [, purchaseId, robloxUsername] = interaction.customId.split('_');
+    const [, purchaseId, robloxUsername] = interaction.customId.split(':');
 
     // Get order again to ensure it hasn't been redeemed
     const orderResult = await getOrder(purchaseId);
@@ -317,6 +325,13 @@ async function handleButtonInteraction(interaction) {
     }
 
     const product = getProduct(order.product_key);
+    if (!product) {
+      return interaction.editReply({
+        content: '❌ This product is no longer configured for whitelisting.',
+        components: [],
+        ephemeral: true
+      });
+    }
 
     // First, try to accept Roblox join request BEFORE marking as redeemed
     const robloxResult = await acceptJoinRequest(product.robloxGroupId, robloxUsername);
