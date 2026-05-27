@@ -6,10 +6,13 @@ Automated webhook system that processes Payhip purchases and whitelists users to
 
 - ✅ Payhip webhook verification with HMAC-SHA256
 - ✅ Supabase database integration for order tracking
+- ✅ **Email-based whitelisting** - No need to remember purchase IDs
+- ✅ **Multiple redemptions per email** - Buy multiple products with same email
 - ✅ Discord bot with `/whitelist` slash command
 - ✅ Automatic Roblox group join request acceptance via Open Cloud API
 - ✅ Discord webhook logging for all events
-- ✅ Modular product configuration
+- ✅ **Database-driven product configuration** - No local files, survives restarts
+- ✅ **Auto-deploy commands** - Commands register automatically on startup
 - ✅ One-time redemption per purchase
 - ✅ Ephemeral Discord interactions for privacy
 - ✅ **Safe order processing** - Orders only marked as used AFTER successful Roblox acceptance
@@ -91,35 +94,50 @@ After first run, edit `products.json` to add products:
 
 ### 5. Setup Supabase Database
 
-Create an `orders` table in Supabase:
+**The app will try to create tables automatically on startup!**
+
+If automatic creation fails, manually run this in Supabase SQL Editor:
 
 ```sql
-CREATE TABLE orders (
+-- Create products table
+CREATE TABLE IF NOT EXISTS products (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  roblox_group_id TEXT NOT NULL,
+  description TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Create orders table
+CREATE TABLE IF NOT EXISTS orders (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL,
   product_key TEXT NOT NULL,
   product_name TEXT NOT NULL,
   redeemed BOOLEAN DEFAULT FALSE,
-  redeemed_at TIMESTAMP,
+  redeemed_at TIMESTAMP WITH TIME ZONE,
   discord_user_id TEXT,
   roblox_username TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
+
+-- Create indexes for performance
+CREATE INDEX IF NOT EXISTS idx_orders_email_lower ON orders (LOWER(email));
+CREATE INDEX IF NOT EXISTS idx_orders_redeemed ON orders (redeemed);
+CREATE INDEX IF NOT EXISTS idx_orders_email_redeemed ON orders (LOWER(email), redeemed, created_at);
 ```
 
-### 6. Deploy Discord Commands
+Go to Settings > API and copy:
+- Project URL → `SUPABASE_URL`
+- service_role key → `SUPABASE_SERVICE_KEY`
 
-Run once to register the slash commands:
-
-```bash
-npm run deploy-commands
-```
-
-### 7. Start the Server
+### 6. Start the Server
 
 ```bash
 npm start
 ```
+
+**Commands are deployed automatically on startup!** No need to run a separate deploy script.
 
 ## Deployment to Render
 
@@ -141,12 +159,14 @@ Configure this URL in your Payhip product settings.
 ### For Customers
 
 1. Purchase a product on Payhip
-2. Receive purchase ID in confirmation email
+2. Note the email address you used for the purchase
 3. Send a join request to the Roblox group
 4. Run `/whitelist` command in Discord:
    - `roblox_username`: Your Roblox username
-   - `purchase_id`: The ID from your email
+   - `email`: The email you used to purchase
 5. Click "Confirm" to complete whitelisting
+
+**Note:** If you have multiple purchases with the same email, they will be redeemed in order (oldest first). You can redeem multiple times with the same email!
 
 ### For Admins
 
@@ -180,6 +200,8 @@ Log to Discord
     
 User runs /whitelist
     ↓
+Find oldest unredeemed order by email
+    ↓
 Verify Purchase (exists & not redeemed)
     ↓
 Confirmation Prompt
@@ -193,7 +215,10 @@ Verify Group Membership (optional check)
 Success Message
 ```
 
-**Important:** The order is only marked as redeemed AFTER the Roblox join request is successfully accepted. This prevents losing purchases if the Roblox API fails.
+**Important:** 
+- The order is only marked as redeemed AFTER the Roblox join request is successfully accepted
+- Users provide their email instead of purchase ID
+- Multiple purchases with the same email are redeemed in order (oldest first)
 
 ## Security
 

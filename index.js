@@ -2,10 +2,9 @@ import express from 'express';
 import crypto from 'crypto';
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import dotenv from 'dotenv';
-import { storeOrder, getOrder, redeemOrder } from './utils/supabase.js';
+import { initializeDatabase, storeOrder, getOrder, getUnredeemedOrder, redeemOrder, getProduct, addProduct, removeProduct, getAllProducts, isValidProduct } from './utils/supabase.js';
 import { logPurchase, logWhitelist, logError } from './utils/discord-logger.js';
 import { authenticateRoblox, acceptJoinRequest } from './utils/roblox.js';
-import { getProduct, isValidProduct, addProduct, removeProduct, getAllProducts } from './config.js';
 
 dotenv.config();
 
@@ -27,20 +26,12 @@ app.post('/webhook', async (req, res) => {
 
   // Verify signature
   const signature = payload.signature;
-  if (!signature) {
-    console.log('❌ Missing signature');
-    return res.sendStatus(401);
-  }
-
   const expected = crypto
-    .createHash('sha256')
+    .createHmac('sha256', PAYHIP_API_KEY)
     .update(PAYHIP_API_KEY)
     .digest('hex');
 
-  const signatureBuffer = Buffer.from(signature, 'hex');
-  const expectedBuffer = Buffer.from(expected, 'hex');
-
-  if (signatureBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
+  if (signature !== expected) {
     console.log('❌ Invalid signature');
     return res.sendStatus(401);
   }
@@ -55,8 +46,8 @@ app.post('/webhook', async (req, res) => {
     return res.sendStatus(400);
   }
 
-  // Get product config
-  const product = getProduct(productKey);
+  // Get product config from Supabase
+  const product = await getProduct(productKey);
   if (!product) {
     console.log(`⚠️ Unknown product key: ${productKey}`);
     // Still store it but with raw product key
@@ -96,14 +87,13 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-client.once('clientReady', () => {
+client.once('ready', () => {
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
 });
 
-// Admin user IDs - add Discord user IDs who can manage products
+// Admin user IDs
 const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS?.split(',').map(id => id.trim()) || [];
 
-// Check if user is admin
 function isAdmin(userId) {
   return ADMIN_USER_IDS.includes(userId);
 }
@@ -129,184 +119,189 @@ client.on('interactionCreate', async (interaction) => {
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply({
-          content: `❌ An error occurred while processing this command: ${error.message}`,
-          components: []
+          content: `❌ An error occurred: ${error.message}`,
+          components: [],
+          ephemeral: true
         });
       } else {
         await interaction.reply({
-          content: `❌ An error occurred while processing this command: ${error.message}`,
+          content: `❌ An error occurred: ${error.message}`,
           ephemeral: true
         });
       }
     } catch (replyError) {
-      console.error('❌ Failed to send error response to user:', replyError);
+      console.error('❌ Failed to send error response:', replyError);
     }
   }
 });
 
 async function handleWhitelistCommand(interaction) {
-  if (interaction.commandName !== 'whitelist') return;
+  try {
+    await interaction.deferReply({ ephemeral: true });
 
-  await interaction.deferReply({ ephemeral: true });
+    const robloxUsername = interaction.options.getString('roblox_username');
+    const email = interaction.options.getString('email');
 
-  const robloxUsername = interaction.options.getString('roblox_username');
-  const purchaseId = interaction.options.getString('purchase_id');
+    console.log(`Whitelist request: ${email} → ${robloxUsername}`);
 
-  // Query Supabase for the purchase
-  const orderResult = await getOrder(purchaseId);
+    const orderResult = await getUnredeemedOrder(email);
 
-  if (!orderResult.success || !orderResult.data) {
-    return interaction.editReply({
-      content: '❌ Purchase ID not found. Please check and try again.',
+    if (!orderResult.success || !orderResult.data) {
+      return interaction.editReply({
+        content: '❌ No unredeemed purchases found for this email address.',
+        ephemeral: true
+      });
+    }
+
+    const order = orderResult.data;
+    console.log(`Found order: ${order.id} for product ${order.product_key}`);
+
+    const product = await getProduct(order.product_key);
+    if (!product) {
+      return interaction.editReply({
+        content: '❌ This product is not configured for whitelisting.',
+        ephemeral: true
+      });
+    }
+
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(`confirm:${order.id}:${robloxUsername}`)
+          .setLabel('Confirm')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId('cancel')
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Secondary)
+      );
+
+    await interaction.editReply({
+      content: `Are you sure you want to whitelist **${robloxUsername}** for **${product.name}**?\n\n📧 Email: ${email}\n🎫 Order ID: \`${order.id}\`\n\n⚠️ This will use one of your purchases.`,
+      components: [row],
       ephemeral: true
     });
+  } catch (error) {
+    console.error('Error in handleWhitelistCommand:', error);
+    throw error;
   }
-
-  const order = orderResult.data;
-
-  // Check if already redeemed
-  if (order.redeemed) {
-    return interaction.editReply({
-      content: `❌ This purchase has already been redeemed by <@${order.discord_user_id}> for Roblox user **${order.roblox_username}**.`,
-      ephemeral: true
-    });
-  }
-
-  // Get product info
-  const product = getProduct(order.product_key);
-  if (!product) {
-    return interaction.editReply({
-      content: '❌ This product is not configured for whitelisting.',
-      ephemeral: true
-    });
-  }
-
-  // Create confirmation buttons
-  const row = new ActionRowBuilder()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId(`confirm:${purchaseId}:${robloxUsername}`)
-        .setLabel('Confirm')
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId('cancel')
-        .setLabel('Cancel')
-        .setStyle(ButtonStyle.Secondary)
-    );
-
-  await interaction.editReply({
-    content: `Are you sure you want to whitelist **${robloxUsername}** for **${product.name}**?\n\n⚠️ This cannot be undone.`,
-    components: [row],
-    ephemeral: true
-  });
 }
 
 async function handleAddProductCommand(interaction) {
-  // Check if user is admin
-  if (!isAdmin(interaction.user.id)) {
-    return interaction.reply({
-      content: '❌ You do not have permission to use this command.',
-      ephemeral: true
-    });
-  }
+  try {
+    if (!isAdmin(interaction.user.id)) {
+      return interaction.reply({
+        content: '❌ You do not have permission to use this command.',
+        ephemeral: true
+      });
+    }
 
-  await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
 
-  const productKey = interaction.options.getString('product_key');
-  const productName = interaction.options.getString('product_name');
-  const groupId = interaction.options.getString('group_id');
-  const description = interaction.options.getString('description') || `${productName} Whitelist`;
+    const productKey = interaction.options.getString('product_key');
+    const productName = interaction.options.getString('product_name');
+    const groupId = interaction.options.getString('group_id');
+    const description = interaction.options.getString('description') || `${productName} Whitelist`;
 
-  // Check if product already exists
-  if (isValidProduct(productKey)) {
-    return interaction.editReply({
-      content: `⚠️ Product key **${productKey}** already exists. Use \`/removeproduct\` first if you want to update it.`,
-      ephemeral: true
-    });
-  }
+    const exists = await isValidProduct(productKey);
+    if (exists) {
+      return interaction.editReply({
+        content: `⚠️ Product key **${productKey}** already exists.`,
+        ephemeral: true
+      });
+    }
 
-  // Add the product
-  const success = addProduct(productKey, productName, groupId, description);
+    const result = await addProduct(productKey, productName, groupId, description);
 
-  if (success) {
-    await interaction.editReply({
-      content: `✅ Product added successfully!\n\n**Product Key:** ${productKey}\n**Name:** ${productName}\n**Group ID:** ${groupId}\n**Description:** ${description}`,
-      ephemeral: true
-    });
-  } else {
-    await interaction.editReply({
-      content: '❌ Failed to add product. Check server logs for details.',
-      ephemeral: true
-    });
+    if (result.success) {
+      await interaction.editReply({
+        content: `✅ Product added!\n\n**Key:** ${productKey}\n**Name:** ${productName}\n**Group ID:** ${groupId}`,
+        ephemeral: true
+      });
+    } else {
+      await interaction.editReply({
+        content: `❌ Failed to add product: ${result.error}`,
+        ephemeral: true
+      });
+    }
+  } catch (error) {
+    console.error('Error in handleAddProductCommand:', error);
+    throw error;
   }
 }
 
 async function handleRemoveProductCommand(interaction) {
-  // Check if user is admin
-  if (!isAdmin(interaction.user.id)) {
-    return interaction.reply({
-      content: '❌ You do not have permission to use this command.',
-      ephemeral: true
-    });
-  }
+  try {
+    if (!isAdmin(interaction.user.id)) {
+      return interaction.reply({
+        content: '❌ You do not have permission to use this command.',
+        ephemeral: true
+      });
+    }
 
-  await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
 
-  const productKey = interaction.options.getString('product_key');
+    const productKey = interaction.options.getString('product_key');
 
-  // Check if product exists
-  const product = getProduct(productKey);
-  if (!product) {
-    return interaction.editReply({
-      content: `❌ Product key **${productKey}** not found.`,
-      ephemeral: true
-    });
-  }
+    const product = await getProduct(productKey);
+    if (!product) {
+      return interaction.editReply({
+        content: `❌ Product key **${productKey}** not found.`,
+        ephemeral: true
+      });
+    }
 
-  // Remove the product
-  const success = removeProduct(productKey);
+    const result = await removeProduct(productKey);
 
-  if (success) {
-    await interaction.editReply({
-      content: `✅ Product **${product.name}** (Key: ${productKey}) has been removed.`,
-      ephemeral: true
-    });
-  } else {
-    await interaction.editReply({
-      content: '❌ Failed to remove product. Check server logs for details.',
-      ephemeral: true
-    });
+    if (result.success) {
+      await interaction.editReply({
+        content: `✅ Product **${product.name}** removed.`,
+        ephemeral: true
+      });
+    } else {
+      await interaction.editReply({
+        content: `❌ Failed to remove product: ${result.error}`,
+        ephemeral: true
+      });
+    }
+  } catch (error) {
+    console.error('Error in handleRemoveProductCommand:', error);
+    throw error;
   }
 }
 
 async function handleListProductsCommand(interaction) {
-  // Check if user is admin
-  if (!isAdmin(interaction.user.id)) {
-    return interaction.reply({
-      content: '❌ You do not have permission to use this command.',
-      ephemeral: true
-    });
-  }
+  try {
+    if (!isAdmin(interaction.user.id)) {
+      return interaction.reply({
+        content: '❌ You do not have permission to use this command.',
+        ephemeral: true
+      });
+    }
 
-  await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
 
-  const products = getAllProducts();
-  const productList = Object.entries(products)
-    .map(([key, product]) => {
-      return `**${product.name}**\n├ Product Key: \`${key}\`\n├ Group ID: \`${product.robloxGroupId}\`\n└ Description: ${product.description}`;
-    })
-    .join('\n\n');
+    const products = await getAllProducts();
+    const productList = Object.entries(products)
+      .map(([key, product]) => {
+        return `**${product.name}**\n├ Key: \`${key}\`\n├ Group: \`${product.robloxGroupId}\`\n└ ${product.description}`;
+      })
+      .join('\n\n');
 
-  if (productList) {
-    await interaction.editReply({
-      content: `📦 **Configured Products** (${Object.keys(products).length})\n\n${productList}`,
-      ephemeral: true
-    });
-  } else {
-    await interaction.editReply({
-      content: '📦 No products configured yet. Use `/addproduct` to add one.',
-      ephemeral: true
-    });
+    if (productList) {
+      await interaction.editReply({
+        content: `📦 **Products** (${Object.keys(products).length})\n\n${productList}`,
+        ephemeral: true
+      });
+    } else {
+      await interaction.editReply({
+        content: '📦 No products configured yet.',
+        ephemeral: true
+      });
+    }
+  } catch (error) {
+    console.error('Error in handleListProductsCommand:', error);
+    throw error;
   }
 }
 
@@ -320,80 +315,69 @@ async function handleButtonInteraction(interaction) {
   }
 
   if (interaction.customId.startsWith('confirm:')) {
-    await interaction.deferUpdate();
+    try {
+      await interaction.deferUpdate();
 
-    const [, purchaseId, robloxUsername] = interaction.customId.split(':');
+      const [, purchaseId, robloxUsername] = interaction.customId.split(':');
 
-    // Get order again to ensure it hasn't been redeemed
-    const orderResult = await getOrder(purchaseId);
-    if (!orderResult.success || !orderResult.data) {
-      return interaction.editReply({
-        content: '❌ Purchase not found.',
+      const orderResult = await getOrder(purchaseId);
+      if (!orderResult.success || !orderResult.data) {
+        return interaction.editReply({
+          content: '❌ Purchase not found.',
+          components: [],
+          ephemeral: true
+        });
+      }
+
+      const order = orderResult.data;
+      if (order.redeemed) {
+        return interaction.editReply({
+          content: '❌ This purchase has already been redeemed.',
+          components: [],
+          ephemeral: true
+        });
+      }
+
+      const product = await getProduct(order.product_key);
+
+      const robloxResult = await acceptJoinRequest(product.robloxGroupId, robloxUsername);
+
+      if (!robloxResult.success) {
+        await logError(`Failed to accept ${robloxUsername}`, robloxResult.error);
+        return interaction.editReply({
+          content: `❌ Failed to accept join request: ${robloxResult.error}\n\nYour purchase has NOT been used. Please ensure:\n1. You sent a join request to the group\n2. Your Roblox username is correct`,
+          components: [],
+          ephemeral: true
+        });
+      }
+
+      const redeemResult = await redeemOrder(purchaseId, interaction.user.id, robloxUsername);
+
+      if (!redeemResult.success) {
+        await logError('Failed to mark order as redeemed', redeemResult.error);
+        return interaction.editReply({
+          content: `⚠️ You were accepted into the group, but database error occurred.\n\nContact admin with ID: **${purchaseId}**`,
+          components: [],
+          ephemeral: true
+        });
+      }
+
+      await logWhitelist(robloxUsername, product.name, purchaseId);
+
+      await interaction.editReply({
+        content: `✅ **${robloxUsername}** has been whitelisted for **${product.name}**!`,
         components: [],
         ephemeral: true
       });
+    } catch (error) {
+      console.error('Error in handleButtonInteraction:', error);
+      throw error;
     }
-
-    const order = orderResult.data;
-    if (order.redeemed) {
-      return interaction.editReply({
-        content: '❌ This purchase has already been redeemed.',
-        components: [],
-        ephemeral: true
-      });
-    }
-
-    const product = getProduct(order.product_key);
-    if (!product) {
-      return interaction.editReply({
-        content: '❌ This product is no longer configured for whitelisting.',
-        components: [],
-        ephemeral: true
-      });
-    }
-
-    // First, try to accept Roblox join request BEFORE marking as redeemed
-    const robloxResult = await acceptJoinRequest(product.robloxGroupId, robloxUsername);
-
-    if (!robloxResult.success) {
-      await logError(`Failed to accept ${robloxUsername} to group`, robloxResult.error);
-      return interaction.editReply({
-        content: `❌ Failed to accept Roblox join request: ${robloxResult.error}\n\nYour purchase has NOT been used. Please ensure:\n1. You sent a join request to the group\n2. Your Roblox username is correct\n3. Try again with \`/whitelist\``,
-        components: [],
-        ephemeral: true
-      });
-    }
-
-    // Only mark as redeemed AFTER successful Roblox acceptance
-    const redeemResult = await redeemOrder(
-      purchaseId,
-      interaction.user.id,
-      robloxUsername
-    );
-
-    if (!redeemResult.success) {
-      await logError('Failed to mark order as redeemed', redeemResult.error);
-      // This is a critical error - user was accepted but DB didn't update
-      return interaction.editReply({
-        content: `⚠️ You were accepted into the group, but there was a database error.\n\nPlease contact an admin immediately with purchase ID: **${purchaseId}**\n\nError: ${redeemResult.error}`,
-        components: [],
-        ephemeral: true
-      });
-    }
-
-    // Success!
-    await logWhitelist(robloxUsername, product.name, purchaseId);
-
-    await interaction.editReply({
-      content: `✅ **${robloxUsername}** has been whitelisted and accepted into the **${product.name}** group!`,
-      components: [],
-      ephemeral: true
-    });
   }
 }
 
 // ============================================
-// STARTUP
+// DEPLOY COMMANDS
 // ============================================
 
 async function deployCommands() {
@@ -409,8 +393,8 @@ async function deployCommands() {
       )
       .addStringOption(option =>
         option
-          .setName('purchase_id')
-          .setDescription('Your purchase ID from the confirmation email')
+          .setName('email')
+          .setDescription('The email you used to purchase')
           .setRequired(true)
       ),
     
@@ -460,40 +444,27 @@ async function deployCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
 
   try {
-    const clientId = process.env.DISCORD_CLIENT_ID;
-    const guildId = process.env.DISCORD_GUILD_ID;
+    console.log('🔄 Deploying slash commands...');
 
-    if (!clientId) {
-      console.warn('⚠️ DISCORD_CLIENT_ID not set, skipping automatic slash command deployment');
-      return;
-    }
+    await rest.put(
+      Routes.applicationCommands(process.env.DISCORD_CLIENT_ID),
+      { body: commands }
+    );
 
-    if (guildId) {
-      console.log(`Started refreshing application (/) commands for guild ${guildId}...`);
-      await rest.put(
-        Routes.applicationGuildCommands(clientId, guildId),
-        { body: commands }
-      );
-      console.log(`✅ Successfully registered application commands instantly for Guild: ${guildId}`);
-    } else {
-      console.log('Started refreshing application (/) commands globally...');
-      await rest.put(
-        Routes.applicationCommands(clientId),
-        { body: commands }
-      );
-      console.log('✅ Successfully registered application commands globally.');
-    }
+    console.log('✅ Successfully deployed slash commands');
   } catch (error) {
-    console.error('❌ Error deploying commands automatically:', error);
+    console.error('❌ Error deploying commands:', error);
   }
 }
 
-async function start() {
-  // Deploy slash commands automatically on startup
-  if (process.env.DISCORD_BOT_TOKEN) {
-    await deployCommands();
-  }
+// ============================================
+// STARTUP
+// ============================================
 
+async function start() {
+  // Initialize database tables
+  await initializeDatabase();
+  
   // Authenticate with Roblox
   await authenticateRoblox();
 
@@ -502,11 +473,13 @@ async function start() {
     console.log(`✅ Webhook server running on port ${PORT}`);
   });
 
-  // Login Discord bot
-  if (process.env.DISCORD_BOT_TOKEN) {
+  if (process.env.DISCORD_BOT_TOKEN && process.env.DISCORD_CLIENT_ID) {
+    // Deploy commands automatically on startup
+    await deployCommands();
+    
     await client.login(process.env.DISCORD_BOT_TOKEN);
   } else {
-    console.log('⚠️ DISCORD_BOT_TOKEN not set, Discord bot will not start');
+    console.log('⚠️ DISCORD_BOT_TOKEN or DISCORD_CLIENT_ID not set');
   }
 }
 
