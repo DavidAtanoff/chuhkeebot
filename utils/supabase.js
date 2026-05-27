@@ -15,41 +15,6 @@ export async function initializeDatabase() {
   try {
     console.log('🔄 Initializing database...');
 
-    // Create products table
-    await supabase.rpc('exec_sql', {
-      sql: `
-        CREATE TABLE IF NOT EXISTS products (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          roblox_group_id TEXT NOT NULL,
-          description TEXT,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
-        );
-      `
-    }).catch(() => {
-      // Table might already exist or RPC not available, that's fine
-      console.log('⚠️ Could not create products table via RPC (might already exist)');
-    });
-
-    // Create orders table
-    await supabase.rpc('exec_sql', {
-      sql: `
-        CREATE TABLE IF NOT EXISTS orders (
-          id TEXT PRIMARY KEY,
-          email TEXT NOT NULL,
-          product_key TEXT NOT NULL,
-          product_name TEXT NOT NULL,
-          redeemed BOOLEAN DEFAULT FALSE,
-          redeemed_at TIMESTAMP WITH TIME ZONE,
-          discord_user_id TEXT,
-          roblox_username TEXT,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
-        );
-      `
-    }).catch(() => {
-      console.log('⚠️ Could not create orders table via RPC (might already exist)');
-    });
-
     // Test connection by trying to query products
     const { error } = await supabase.from('products').select('id').limit(1);
     

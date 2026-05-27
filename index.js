@@ -87,7 +87,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-client.once('ready', () => {
+client.once('clientReady', () => {
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
 });
 
